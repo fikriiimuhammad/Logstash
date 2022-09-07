@@ -1,0 +1,50 @@
+input {					
+  stdin {
+  
+  }	
+}					
+					
+filter {					
+		
+  #Filter untuk grok debugger  
+	grok {				
+		match => { "message" =>			
+		%{WORD:transaction}\s(?<request_come>[\w\s\:]+)\s\+07:00\s(?<middle_time>[\w\/\s\:]+)\s\+07:00\s(?<response_come>[\w\/\s\:]+)\s\+07:00\s%{GREEDYDATA:xmessage}'			
+		}			
+	}				
+	
+  #Filter untuk convert date
+	date {				
+		match => ["request_come", "yyyy MMM dd HH:mm:ss"] 			
+		target => "request_come_time"			
+	}				
+					
+	date {				
+		match => ["response_come", "yyyy MMM dd HH:mm:ss"] 			
+		target => "response_come_time"			
+	}				
+	ruby {				
+					init => "require 'time'"
+          code => "
+                    waktu_INCOMING = (event.get('request_come_time')).to_f;
+                    waktu_FWDSOA = (event.get('response_come_time')).to_f;
+                    time_taken = (waktu_FWDSOA - waktu_INCOMING);
+                    #time_taken = (waktu_INCOMING - waktu_FWDSOA);
+                    event.set('response_time', ((time_taken) * 1000).round(0));
+
+                    #event.set('step_status', 'completed');					
+        }
+	grok {
+		match => { xmessage"" =>"
+			
+		(?<message_id>[\w\@\.]+)\s(?<internal_message_id>[\w\-]+)\s%{WORD}\s1\s(?<sender>[\w\@\.]+)\s(?<recepient>[\w\@\.]+)\s%{GREEDYDATA:subject}\t%{GREEDYDATA:connecting_from}\t%{GREEDYDATA}\[%{GREEDYDATA:ymessage}'			
+		}			
+	}				
+					
+					
+}					
+					
+output {					
+  stdout { codec => rubydebug }					
+  }								
+}					
