@@ -1,0 +1,209 @@
+input {														
+  stdin {
+  
+  }														
+}														
+														
+filter{														
+		#menghilangkan newline pada log 												
+    mutate {														
+            gsub => [ "message", "\n", "" ]														
+    }														
+    														
+    grok {														
+                   match => {"message" =>['%{WORD:logtype} (?<xdate>[\w\-\s\:\,]+)\s(?<field1>[\w\(\:\)\<\>\.]+)\s\-\s%{GREEDYDATA:xmessage}'														
+                   														
+                   ]														
+                   }														
+    }														
+    														
+    date {														
+						match => ["xdate", "yyyy-MM-dd HH:mm:ss,SSS"]								
+						target => "@timestamp"								
+    }														
+    														
+    #2022-08-02 13:30:06,383														
+    
+    #jika pada field1 terdapat kalimat perfomance														
+    if [field1] =~ "^Performance" {														
+        grok {														
+                   match => {"xmessage" =>['\[(?<field2>[\w\-]+)\]\[%{GREEDYDATA:ymessage}\](?<state>[\w]+)\s\[(?<response_time>[\w\s]+)\sms\]' , '\[(?<field2>[\w\-]+)\]\[%{GREEDYDATA:ymessage}\](?<state>[\w\s]+):\s(?<response_time>[\w]+)\sms'														
+                   														
+                   ]														
+                   }														
+        }														
+        														
+        mutate { 														
+                convert => {response_time => integer}														
+        }		
+    #jika pada field1 ada kalimat SOAPMonitorService    
+    } else if [field1] =~ "SOAPMonitorService" {														
+        grok {														
+                   match => {"xmessage" =>['ID : (?<trx_id>[\w]+)Type : (?<method_type>[\w]+)Target : (?<target>[\w\_]+)\@(?<enpoint>[\w\:\-\/]+)SOAP Message : %{GREEDYDATA:soap_message}'														
+                   														
+                   ]														
+                   }														
+        }														
+        #menggunakan filter xml apabile pada field method_type terdapat kalimat Request														
+        if [method_type] =~ "Request" {														
+            xml {														
+                source => "soap_message"														
+                target => "soapReq"														
+                force_array => false														
+            }														
+            #filter merubah nama 														
+            mutate {														
+                rename => { "[soapReq][Body][overbookingOTR][clientParam][channelId][content]" => "channelId"}														
+                rename => { "[soapReq][Body][overbookingOTR][clientParam][counterPartId][content]" => "counterPartId"}														
+                rename => { "[soapReq][Body][overbookingOTR][clientParam][userId][content]" => "userId"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][accountCover][content]" => "accountCover"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][acctWithInstName][content]" => "acctWithInstName"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][acctWithInstPartyId][content]" => "acctWithInstPartyId"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][amount][content]" => "amount"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][beneficiaryAccount][content]" => "beneficiaryAccount"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][beneficiaryName][content]" => "beneficiaryName"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][obk][content]" => "obk"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][orderingName][content]" => "orderingName"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][rate][content]" => "rate"}														
+                rename => { "[soapReq][Body][overbookingOTR][otrOder][refNumber][content]" => "refNumber"}														
+            }														
+            														
+            #mutate {														
+            #            remove_field => ["soapReq"]														
+            #}														
+            														
+        }														
+        														
+        														
+        if [method_type] =~ "Response" {														
+            xml {														
+                source => "soap_message"														
+                target => "soapRes"														
+                force_array => false														
+            }														
+            														
+            mutate {														
+                rename => { "[soapRes][Body][overbookingOTRResponse][okMessage][message]" => "responseMessage"}														
+                rename => { "[soapRes][Body][Fault][faultstring]" => "responseMessage"}														
+                rename => { "[soapRes][Body][Fault][detail][transaction_appFault][errorDescription]" => "errorMessage"}														
+				rename => { "[soapRes][Body][Fault][detail][transaction_sysFault][errorDescription]" => "errorMessage"}										
+														
+														
+														
+														
+				#soapRes.Body.Fault.detail.transaction_appFault.errorDescription										
+				#CABANG TIDAK DIIJINKAN OVERDRAFT										
+				#soapRes.Body.Fault.detail.transaction_appFault.errorNum										
+				#3469										
+														
+				#soapRes.Body.Fault.detail.transaction_sysFault.errorDescription										
+				#INVALID REQUEST/RESPONSE MESSAGE										
+				#soapRes.Body.Fault.detail.transaction_sysFault.errorNum										
+				#9202										
+                														
+            }														
+            #filter untuk menambahkan field apabila field pada soap message faultcode	ditambahkan menjadi fail													
+            if [soap_message] =~ "faultcode" {														
+                mutate {														
+                     add_field => { "trxStatus" => "fail" }														
+                }														
+            #filter untuk menambahkan field apabila field pada soap message okMessage ditambahkan menjadi success    
+            } else if [soap_message] =~ "okMessage" {														
+                mutate {														
+                     add_field => { "trxStatus" => "success" }														
+                }														
+            } else {														
+                mutate {														
+                     add_field => { "trxStatus" => "other" }														
+                }														
+            }														
+            														
+            #mutate {														
+            #            remove_field => ["soapRes"]														
+            #}														
+        }														
+        														
+        #aggregate {														
+		#				   task_id => "%{trx_id}"								
+		#				   code => "								
+		#						if event.get('method_type') == 'Request' then						
+        #                            map['request_come'] = event.get('@timestamp');														
+        #                            map['field1'] = event.get('field1');														
+        #                            map['enpoint'] = event.get('enpoint');														
+        #                            map['target'] = event.get('target');														
+        #                            map['@timestamp'] = event.get('@timestamp');														
+		#							map['channelId'] = event.get('channelId');					
+		#							map['counterPartId'] = event.get('counterPartId');					
+		#							map['userId'] = event.get('userId');					
+        #                            map['accountCover'] = event.get('accountCover');														
+        #                            map['acctWithInstName'] = event.get('acctWithInstName');														
+        #                            map['acctWithInstPartyId'] = event.get('acctWithInstPartyId');														
+        #                            map['amount'] = event.get('amount');														
+        #                            map['beneficiaryAccount'] = event.get('beneficiaryAccount');														
+        #                            map['beneficiaryName'] = event.get('beneficiaryName');														
+        #                            map['obk'] = event.get('obk');														
+        #                            map['orderingName'] = event.get('orderingName');														
+        #                            map['rate'] = event.get('rate');														
+        #                            map['refNumber'] = event.get('refNumber');														
+        #                            map['logtype'] = event.get('logtype');														
+		#						end;						
+        #                        if event.get('method_type') == 'Response' then														
+		#							map['response_come'] = event.get('@timestamp');					
+        #                            map['responseMessage'] = event.get('responseMessage');														
+        #                            map['trxStatus'] = event.get('trxStatus');														
+        #                            														
+		#						end;						
+		#						event.cancel(); 						
+		#				   "								
+		#				   push_map_as_event_on_timeout => true								
+		#				   timeout_task_id_field => "trx_id"								
+		#				   inactivity_timeout => 30								
+		#				   timeout => 60								
+		#				   map_action => "create_or_update"								
+        #}														
+        #														
+        #if [response_come] {														
+        #    ruby {														
+		#					init => "require 'time'"							
+		#					code => "							
+		#						waktu_INCOMING = (event.get('request_come')).to_f;						
+		#						waktu_FWDSOA = (event.get('response_come')).to_f;						
+		#						time_taken = (waktu_FWDSOA - waktu_INCOMING);						
+		#						#time_taken = (waktu_INCOMING - waktu_FWDSOA);						
+		#						event.set('response_time', ((time_taken) * 1000).round(0));						
+        #                        event.set('step_status', 'completed');														
+		#					"
+        #    }
+        #} else {
+        #        ruby {
+        #                        code => "							
+        #                            event.set('step_status', 'not_completed');														
+        #                            event.set('trxStatus', 'fail');														
+        #                        "														
+        #        }														
+        #}														
+        #														
+        #mutate { 														
+        #        convert => {amount => float}														
+        #}														
+        														
+    }														
+    														
+    grok {														
+                   match => {"field1" =>['(?<class>[\w\.]+)\((?<function>[\w\:\>\<]+)\)'														
+                   														
+                   ]														
+                   }														
+    }														
+    #(?<class>[\w\][]+)\((?<function>[\w\:]+)\)														
+    mutate {														
+                        remove_field => ["log","agent","ecs","event","xdate"]														
+         }														
+    #\[(?<field2>[\w\-]+)\]\[%{GREEDYDATA:xmessage}\](?<task>[\w]+)\s\[(?<response>[\w\s]+)\sms\]														
+}														
+														
+output {														
+  stdout {
+    codec => rubydebug
+  }													
+  }														
